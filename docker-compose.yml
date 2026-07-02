@@ -1,0 +1,49 @@
+version: '3.9'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.backend
+    image: apk-builder-backend:latest
+    container_name: apk-builder-backend
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/outputs:/app/outputs
+      - ./backend/workspace:/app/workspace
+      - ./backend/history.json:/app/history.json
+      - /var/run/docker.sock:/var/run/docker.sock   # Allow spawning build containers
+    environment:
+      - PORT=4000
+      - BASE_URL=http://localhost:4000
+      - USE_DOCKER=true
+      - BUILD_TIMEOUT_MS=600000
+      - NODE_ENV=production
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    image: apk-builder-frontend:latest
+    container_name: apk-builder-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    environment:
+      - VITE_API_URL=http://localhost:4000
+      - VITE_WS_URL=ws://localhost:4000
+    restart: unless-stopped
+
+volumes:
+  uploads:
+  outputs:
+  workspace:
