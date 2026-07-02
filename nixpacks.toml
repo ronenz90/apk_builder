@@ -1,5 +1,16 @@
 [phases.setup]
-nixPkgs = ["nodejs_20", "jdk17", "wget", "unzip", "curl", "bash", "findutils", "coreutils"]
+nixPkgs = [
+  "nodejs_20",
+  "jdk17",
+  "android-tools",
+  "wget",
+  "unzip",
+  "curl",
+  "bash",
+  "findutils",
+  "coreutils",
+  "gradle"
+]
 
 [phases.install]
 cmds = [
