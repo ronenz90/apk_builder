@@ -71,10 +71,15 @@ app.post('/api/build', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const buildId = uuidv4();
   const buildType = req.body.buildType === 'release' ? 'release' : 'debug';
+  const originalName = req.file.originalname; // שם הקובץ המקורי
   res.json({ buildId });
 
   const orchestrator = new BuildOrchestrator({
-    buildId, zipPath: req.file.path, buildType, outputDir: OUTPUT_DIR,
+    buildId,
+    zipPath: req.file.path,
+    originalName, // מעבירים את השם המקורי
+    buildType,
+    outputDir: OUTPUT_DIR,
     onLog: (text, level = 'info') => broadcast(buildId, { type: 'log', text, level }),
     onStage: (stage) => broadcast(buildId, { type: 'stage', stage }),
     onSuccess: (data) => broadcast(buildId, { type: 'success', ...data }),
@@ -84,7 +89,7 @@ app.post('/api/build', upload.single('file'), async (req, res) => {
   orchestrator.run().catch(err => broadcast(buildId, { type: 'error', message: err.message }));
 });
 
-// Callback from GitHub Actions when build is done
+// Callback from GitHub Actions
 app.post('/api/callback/:buildId', upload.single('apk'), (req, res) => {
   const { buildId } = req.params;
   const status = req.body.status;
@@ -118,7 +123,6 @@ app.get('/api/health', (req, res) => res.json({
   node: process.version
 }));
 
-// SPA fallback
 app.get('*', (req, res) => {
   const indexPath = path.join(FRONTEND_DIR, 'index.html');
   fs.existsSync(indexPath) ? res.sendFile(indexPath) : res.status(200).send(
