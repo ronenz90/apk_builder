@@ -1,7 +1,6 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const http = require('http');
 const { v4: uuidv4 } = require('uuid');
 const AdmZip = require('adm-zip');
 const QRCode = require('qrcode');
@@ -18,9 +17,10 @@ const WORK_DIR = path.join(__dirname, 'workspace');
 fs.mkdirSync(WORK_DIR, { recursive: true });
 
 class BuildOrchestrator {
-  constructor({ buildId, zipPath, buildType, outputDir, onLog, onStage, onSuccess, onError }) {
+  constructor({ buildId, zipPath, originalName, buildType, outputDir, onLog, onStage, onSuccess, onError }) {
     this.buildId = buildId;
     this.zipPath = zipPath;
+    this.originalName = originalName || 'app'; // שם המקורי של הZIP
     this.buildType = buildType;
     this.outputDir = outputDir;
     this.onLog = onLog;
@@ -45,7 +45,7 @@ class BuildOrchestrator {
       }
       this.log('✓ Valid Android project', 'success');
 
-      // Stage 2: Upload ZIP to GitHub as release asset
+      // Stage 2: Upload ZIP to GitHub
       this.onStage('validate');
       this.log('☁️ Uploading project to GitHub...');
       const downloadUrl = await this.uploadToGitHub();
@@ -57,7 +57,7 @@ class BuildOrchestrator {
       const callbackUrl = `${BASE_URL}/api/callback/${this.buildId}`;
       await this.triggerWorkflow(downloadUrl, callbackUrl);
       this.log('✓ Build started on GitHub Actions', 'success');
-      this.log('ℹ Waiting for build to complete (~3-5 minutes)...');
+      this.log('ℹ Waiting for build (~3-5 minutes)...');
 
       // Stage 4: Wait for callback
       await this.waitForCallback();
@@ -75,7 +75,6 @@ class BuildOrchestrator {
         const zipContent = fs.readFileSync(this.zipPath);
         const filename = `${this.buildId}.zip`;
 
-        // Create a release to host the file
         const releaseData = JSON.stringify({
           tag_name: `build-${this.buildId}`,
           name: `Build ${this.buildId}`,
@@ -91,7 +90,6 @@ class BuildOrchestrator {
         const releaseId = JSON.parse(release).id;
         const uploadUrl = `https://uploads.github.com/repos/${GITHUB_OWNER}/${GITHUB_BUILDS_REPO}/releases/${releaseId}/assets?name=${filename}`;
 
-        // Upload ZIP as release asset
         await this.uploadAsset(uploadUrl, zipContent, filename);
 
         const downloadUrl = `https://github.com/${GITHUB_OWNER}/${GITHUB_BUILDS_REPO}/releases/download/build-${this.buildId}/${filename}`;
@@ -103,12 +101,19 @@ class BuildOrchestrator {
   }
 
   triggerWorkflow(downloadUrl, callbackUrl) {
+    // נקה את שם הקובץ מתווים לא חוקיים
+    const projectName = this.originalName
+      .replace(/\.zip$/i, '')
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .substring(0, 50);
+
     const data = JSON.stringify({
       ref: 'main',
       inputs: {
         download_url: downloadUrl,
         build_type: this.buildType,
-        callback_url: callbackUrl
+        callback_url: callbackUrl,
+        project_name: projectName
       }
     });
 
@@ -120,11 +125,10 @@ class BuildOrchestrator {
 
   waitForCallback() {
     return new Promise((resolve, reject) => {
-      // Store resolve/reject in global map so callback endpoint can call them
       global.buildCallbacks = global.buildCallbacks || {};
       global.buildCallbacks[this.buildId] = {
-        resolve: (apkPath) => {
-          this.handleSuccess(apkPath).then(resolve).catch(reject);
+        resolve: (apkPath, apkName) => {
+          this.handleSuccess(apkPath, apkName).then(resolve).catch(reject);
         },
         reject: (err) => {
           this.onError(err);
@@ -132,7 +136,6 @@ class BuildOrchestrator {
         }
       };
 
-      // Timeout after 15 minutes
       setTimeout(() => {
         delete global.buildCallbacks[this.buildId];
         reject(new Error('Build timed out after 15 minutes'));
@@ -140,8 +143,10 @@ class BuildOrchestrator {
     });
   }
 
-  async handleSuccess(apkBuffer) {
-    const apkFilename = `${this.buildId}-${this.buildType}.apk`;
+  async handleSuccess(apkBuffer, apkName) {
+    // השתמש בשם המקורי של הZIP
+    const projectName = this.originalName.replace(/\.zip$/i, '').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const apkFilename = `${projectName}-${this.buildType}.apk`;
     const destPath = path.join(this.outputDir, apkFilename);
     fs.writeFileSync(destPath, apkBuffer);
 
@@ -149,7 +154,7 @@ class BuildOrchestrator {
     const apkUrl = `/downloads/${apkFilename}`;
     const fullUrl = `${BASE_URL}${apkUrl}`;
 
-    this.log(`📱 APK ready: ${apkFilename} (${sizeMB} MB)`, 'success');
+    this.log(`📱 APK: ${apkFilename} (${sizeMB} MB)`, 'success');
 
     let qrCode = null;
     try { qrCode = await QRCode.toDataURL(fullUrl, { width: 200, margin: 1 }); } catch {}
@@ -158,11 +163,11 @@ class BuildOrchestrator {
     this.cleanup();
   }
 
-  githubRequest(method, path, data) {
+  githubRequest(method, apiPath, data) {
     return new Promise((resolve, reject) => {
       const options = {
         hostname: 'api.github.com',
-        path,
+        path: apiPath,
         method,
         headers: {
           'Authorization': `Bearer ${GITHUB_TOKEN}`,
@@ -177,7 +182,7 @@ class BuildOrchestrator {
         let body = '';
         res.on('data', chunk => body += chunk);
         res.on('end', () => {
-          if (res.statusCode >= 400) reject(new Error(`GitHub API error ${res.statusCode}: ${body}`));
+          if (res.statusCode >= 400) reject(new Error(`GitHub API ${res.statusCode}: ${body}`));
           else resolve(body);
         });
       });
