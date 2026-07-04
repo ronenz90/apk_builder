@@ -22,6 +22,9 @@ const FRONTEND_DIR = path.join(__dirname, '..', 'frontend', 'dist');
 
 const buildClients = new Map();
 
+// Build status store - for polling
+const buildStatus = new Map();
+
 const storage = multer.diskStorage({
   destination: UPLOAD_DIR,
   filename: (req, file, cb) => cb(null, `${uuidv4()}.zip`)
@@ -52,6 +55,14 @@ wss.on('connection', (ws, req) => {
   const buildId = match[1];
   if (!buildClients.has(buildId)) buildClients.set(buildId, new Set());
   buildClients.get(buildId).add(ws);
+
+  // Send current status if available
+  const status = buildStatus.get(buildId);
+  if (status) {
+    status.logs.forEach(log => ws.send(JSON.stringify({ type: 'log', ...log })));
+    if (status.result) ws.send(JSON.stringify(status.result));
+  }
+
   ws.on('close', () => {
     const set = buildClients.get(buildId);
     if (set) { set.delete(ws); if (!set.size) buildClients.delete(buildId); }
@@ -60,6 +71,17 @@ wss.on('connection', (ws, req) => {
 });
 
 function broadcast(buildId, msg) {
+  // Save to status store
+  if (!buildStatus.has(buildId)) buildStatus.set(buildId, { logs: [], result: null });
+  const status = buildStatus.get(buildId);
+  if (msg.type === 'log') status.logs.push({ text: msg.text, level: msg.level });
+  if (['success', 'error'].includes(msg.type)) {
+    status.result = msg;
+    // Clean up after 1 hour
+    setTimeout(() => buildStatus.delete(buildId), 3600000);
+  }
+
+  // Send via WebSocket
   const clients = buildClients.get(buildId);
   if (!clients) return;
   const data = JSON.stringify(msg);
@@ -71,15 +93,11 @@ app.post('/api/build', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const buildId = uuidv4();
   const buildType = req.body.buildType === 'release' ? 'release' : 'debug';
-  const originalName = req.file.originalname; // שם הקובץ המקורי
+  const originalName = req.file.originalname;
   res.json({ buildId });
 
   const orchestrator = new BuildOrchestrator({
-    buildId,
-    zipPath: req.file.path,
-    originalName, // מעבירים את השם המקורי
-    buildType,
-    outputDir: OUTPUT_DIR,
+    buildId, zipPath: req.file.path, originalName, buildType, outputDir: OUTPUT_DIR,
     onLog: (text, level = 'info') => broadcast(buildId, { type: 'log', text, level }),
     onStage: (stage) => broadcast(buildId, { type: 'stage', stage }),
     onSuccess: (data) => broadcast(buildId, { type: 'success', ...data }),
@@ -87,6 +105,18 @@ app.post('/api/build', upload.single('file'), async (req, res) => {
   });
 
   orchestrator.run().catch(err => broadcast(buildId, { type: 'error', message: err.message }));
+});
+
+// Polling endpoint - frontend polls this every 5s
+app.get('/api/status/:buildId', (req, res) => {
+  const { buildId } = req.params;
+  const status = buildStatus.get(buildId);
+  if (!status) return res.json({ status: 'unknown' });
+  res.json({
+    status: status.result ? (status.result.type === 'success' ? 'done' : 'error') : 'building',
+    logs: status.logs,
+    result: status.result
+  });
 });
 
 // Callback from GitHub Actions
