@@ -33,7 +33,8 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     const ok = file.mimetype === 'application/zip'
       || file.mimetype === 'application/x-zip-compressed'
-      || file.originalname.toLowerCase().endsWith('.zip');
+      || file.originalname.toLowerCase().endsWith('.zip')
+      || file.originalname.toLowerCase().endsWith('.apk');
     ok ? cb(null, true) : cb(new Error('ZIP files only'));
   }
 });
@@ -41,9 +42,7 @@ const upload = multer({
 app.use(cors());
 app.use(express.json());
 
-if (fs.existsSync(FRONTEND_DIR)) {
-  app.use(express.static(FRONTEND_DIR));
-}
+if (fs.existsSync(FRONTEND_DIR)) app.use(express.static(FRONTEND_DIR));
 app.use('/downloads', express.static(OUTPUT_DIR));
 
 // WebSocket
@@ -67,7 +66,7 @@ function broadcast(buildId, msg) {
   clients.forEach(ws => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
 }
 
-// API
+// Upload + trigger build
 app.post('/api/build', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const buildId = uuidv4();
@@ -75,10 +74,7 @@ app.post('/api/build', upload.single('file'), async (req, res) => {
   res.json({ buildId });
 
   const orchestrator = new BuildOrchestrator({
-    buildId,
-    zipPath: req.file.path,
-    buildType,
-    outputDir: OUTPUT_DIR,
+    buildId, zipPath: req.file.path, buildType, outputDir: OUTPUT_DIR,
     onLog: (text, level = 'info') => broadcast(buildId, { type: 'log', text, level }),
     onStage: (stage) => broadcast(buildId, { type: 'stage', stage }),
     onSuccess: (data) => broadcast(buildId, { type: 'success', ...data }),
@@ -86,6 +82,27 @@ app.post('/api/build', upload.single('file'), async (req, res) => {
   });
 
   orchestrator.run().catch(err => broadcast(buildId, { type: 'error', message: err.message }));
+});
+
+// Callback from GitHub Actions when build is done
+app.post('/api/callback/:buildId', upload.single('apk'), (req, res) => {
+  const { buildId } = req.params;
+  const status = req.body.status;
+
+  res.json({ ok: true });
+
+  const callbacks = global.buildCallbacks || {};
+  if (!callbacks[buildId]) return;
+
+  if (status === 'success' && req.file) {
+    const apkBuffer = fs.readFileSync(req.file.path);
+    fs.rmSync(req.file.path, { force: true });
+    callbacks[buildId].resolve(apkBuffer);
+  } else {
+    callbacks[buildId].reject(req.body.error || 'Build failed');
+  }
+
+  delete callbacks[buildId];
 });
 
 app.get('/api/history', (req, res) => {
@@ -97,18 +114,19 @@ app.get('/api/history', (req, res) => {
 
 app.get('/api/health', (req, res) => res.json({
   status: 'ok', ts: Date.now(),
-  androidSdk: !!process.env.ANDROID_HOME, node: process.version
+  githubActions: !!(process.env.GITHUB_TOKEN && process.env.GITHUB_OWNER),
+  node: process.version
 }));
 
 // SPA fallback
 app.get('*', (req, res) => {
   const indexPath = path.join(FRONTEND_DIR, 'index.html');
-  fs.existsSync(indexPath)
-    ? res.sendFile(indexPath)
-    : res.status(404).send('Frontend not built');
+  fs.existsSync(indexPath) ? res.sendFile(indexPath) : res.status(200).send(
+    '<h2 style="font-family:sans-serif;padding:40px">APK Builder running</h2>'
+  );
 });
 
 server.listen(PORT, () => {
-  console.log(`✓ APK Builder on :${PORT}`);
-  console.log(`  ANDROID_HOME: ${process.env.ANDROID_HOME || 'not set'}`);
+  console.log(`APK Builder on :${PORT}`);
+  console.log(`GitHub Actions: ${process.env.GITHUB_TOKEN ? 'configured' : 'NOT configured'}`);
 });
