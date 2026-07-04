@@ -1,7 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
 
-// Auto-detect URLs - works locally AND on Railway
 const API_URL = import.meta.env.VITE_API_URL || window.location.origin;
 const WS_URL = import.meta.env.VITE_WS_URL ||
   `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
@@ -23,7 +22,7 @@ const TRANSLATIONS = {
     validating: "Validating project...", building: "Building APK...",
     success: "Build Successful!", download: "Download APK", failed: "Build Failed",
     restart: "New Build", logs: "Build Logs", apkSize: "APK Size",
-    buildTime: "Build Time", install: "Install App", installing: "Add to Home Screen",
+    buildTime: "Build Time", install: "Install App",
   },
   he: {
     title: "בונה APK", sub: "העלה ZIP ← בנה ← הורד APK",
@@ -33,7 +32,7 @@ const TRANSLATIONS = {
     validating: "מאמת פרויקט...", building: "בונה APK...",
     success: "הבנייה הצליחה!", download: "הורד APK", failed: "הבנייה נכשלה",
     restart: "בנייה חדשה", logs: "יומן בנייה", apkSize: "גודל APK",
-    buildTime: "זמן בנייה", install: "התקן אפליקציה", installing: "הוסף למסך הבית",
+    buildTime: "זמן בנייה", install: "התקן אפליקציה",
   },
 };
 
@@ -50,17 +49,17 @@ export default function App() {
   const [buildStartTime, setBuildStartTime] = useState(null);
   const [qrCode, setQrCode] = useState(null);
   const [installPrompt, setInstallPrompt] = useState(null);
-  const [isInstalled, setIsInstalled] = useState(false);
+  const [currentBuildId, setCurrentBuildId] = useState(null);
   const logsRef = useRef(null);
   const wsRef = useRef(null);
+  const pollRef = useRef(null);
+  const seenLogsRef = useRef(new Set());
 
   const t = TRANSLATIONS[lang];
 
-  // Capture PWA install prompt
   useEffect(() => {
     const handler = (e) => { e.preventDefault(); setInstallPrompt(e); };
     window.addEventListener('beforeinstallprompt', handler);
-    window.addEventListener('appinstalled', () => setIsInstalled(true));
     return () => window.removeEventListener('beforeinstallprompt', handler);
   }, []);
 
@@ -68,34 +67,75 @@ export default function App() {
     if (!installPrompt) return;
     installPrompt.prompt();
     const { outcome } = await installPrompt.userChoice;
-    if (outcome === 'accepted') { setIsInstalled(true); setInstallPrompt(null); }
+    if (outcome === 'accepted') setInstallPrompt(null);
   };
 
-  const addLog = (text, type = "info") =>
+  const addLog = (text, type = "info") => {
+    const key = `${text}${type}`;
+    if (seenLogsRef.current.has(key)) return;
+    seenLogsRef.current.add(key);
     setLogs(prev => [...prev, { text, type, ts: Date.now() }]);
+  };
 
   useEffect(() => {
     if (logsRef.current) logsRef.current.scrollTop = logsRef.current.scrollHeight;
   }, [logs]);
 
-  const connectWS = (id) => {
-    const ws = new WebSocket(`${WS_URL}/ws/${id}`);
+  const handleResult = useCallback((msg) => {
+    if (msg.type === 'success') {
+      setStage("done");
+      setApkUrl(msg.apkUrl);
+      setApkSize(msg.apkSize);
+      setQrCode(msg.qrCode);
+      setBuildTime(((Date.now() - buildStartTime) / 1000).toFixed(1));
+      stopPolling();
+    }
+    if (msg.type === 'error') {
+      setStage("error");
+      setErrorMsg(msg.message);
+      stopPolling();
+    }
+  }, [buildStartTime]);
+
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  const startPolling = useCallback((buildId) => {
+    // Poll every 5 seconds as backup to WebSocket
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/status/${buildId}`);
+        const data = await res.json();
+
+        // Add any new logs
+        if (data.logs) {
+          data.logs.forEach(log => addLog(log.text, log.level || 'info'));
+        }
+
+        // Update stage
+        if (data.status === 'building') setStage('build');
+
+        // Handle result
+        if (data.result) handleResult(data.result);
+
+      } catch (e) { /* ignore poll errors */ }
+    }, 5000);
+  }, [handleResult]);
+
+  const connectWS = useCallback((buildId) => {
+    const ws = new WebSocket(`${WS_URL}/ws/${buildId}`);
     wsRef.current = ws;
+
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data);
       if (msg.type === "log") addLog(msg.text, msg.level || "info");
       if (msg.type === "stage") setStage(msg.stage);
-      if (msg.type === "success") {
-        setStage("done");
-        setApkUrl(msg.apkUrl);
-        setApkSize(msg.apkSize);
-        setQrCode(msg.qrCode);
-        setBuildTime(((Date.now() - buildStartTime) / 1000).toFixed(1));
-      }
-      if (msg.type === "error") { setStage("error"); setErrorMsg(msg.message); }
+      if (msg.type === "success" || msg.type === "error") handleResult(msg);
     };
-    ws.onerror = () => addLog("Connection error — try refreshing", "error");
-  };
+
+    ws.onerror = () => addLog("WebSocket disconnected — polling active", "warn");
+  }, [handleResult]);
 
   const onDrop = useCallback(async (accepted, rejected) => {
     if (rejected.length > 0) {
@@ -103,8 +143,10 @@ export default function App() {
       setStage("error"); return;
     }
     const file = accepted[0];
-    setStage("uploading"); setUploadProgress(0); setLogs([]); setApkUrl(null);
-    setErrorMsg(null); setBuildStartTime(Date.now());
+    setStage("uploading"); setUploadProgress(0); setLogs([]);
+    setApkUrl(null); setErrorMsg(null); setBuildStartTime(Date.now());
+    seenLogsRef.current = new Set();
+    stopPolling();
 
     const formData = new FormData();
     formData.append("file", file);
@@ -117,7 +159,9 @@ export default function App() {
     xhr.onload = () => {
       const data = JSON.parse(xhr.responseText);
       if (xhr.status === 200) {
+        setCurrentBuildId(data.buildId);
         connectWS(data.buildId);
+        startPolling(data.buildId);
         setStage("extract");
         addLog(`Build ID: ${data.buildId}`);
       } else {
@@ -127,7 +171,7 @@ export default function App() {
     xhr.onerror = () => { setStage("error"); setErrorMsg("Network error"); };
     xhr.open("POST", `${API_URL}/api/build`);
     xhr.send(formData);
-  }, [buildType, buildStartTime]);
+  }, [buildType, connectWS, startPolling]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -138,9 +182,11 @@ export default function App() {
 
   const reset = () => {
     if (wsRef.current) wsRef.current.close();
+    stopPolling();
     setStage("idle"); setLogs([]); setUploadProgress(0);
     setApkUrl(null); setApkSize(null); setBuildTime(null);
-    setErrorMsg(null); setQrCode(null);
+    setErrorMsg(null); setQrCode(null); setCurrentBuildId(null);
+    seenLogsRef.current = new Set();
   };
 
   const isActive = !["idle", "done", "error"].includes(stage);
@@ -151,19 +197,14 @@ export default function App() {
 
   return (
     <div className={`app ${lang === "he" ? "rtl" : ""}`}>
-
-      {/* Navbar */}
       <nav className="navbar">
         <div className="nav-brand">
           <span className="brand-icon">◈</span>
           <span className="brand-name">APK Builder</span>
         </div>
         <div className="nav-actions">
-          {/* PWA Install Button */}
-          {installPrompt && !isInstalled && (
-            <button className="install-btn" onClick={handleInstall}>
-              📲 {t.install}
-            </button>
+          {installPrompt && (
+            <button className="install-btn" onClick={handleInstall}>📲 {t.install}</button>
           )}
           <button className={`lang-btn ${lang === "en" ? "active" : ""}`} onClick={() => setLang("en")}>EN</button>
           <button className={`lang-btn ${lang === "he" ? "active" : ""}`} onClick={() => setLang("he")}>עב</button>
@@ -176,22 +217,16 @@ export default function App() {
           <p className="hero-sub">{t.sub}</p>
         </header>
 
-        {/* Build Type */}
         <div className="build-type-row">
           <span className="build-type-label">{t.buildType}:</span>
           <div className="toggle-group">
             <button className={`toggle-btn ${buildType === "debug" ? "active" : ""}`}
-              onClick={() => setBuildType("debug")} disabled={isActive}>
-              🐛 {t.debug}
-            </button>
+              onClick={() => setBuildType("debug")} disabled={isActive}>🐛 {t.debug}</button>
             <button className={`toggle-btn ${buildType === "release" ? "active" : ""}`}
-              onClick={() => setBuildType("release")} disabled={isActive}>
-              🚀 {t.release}
-            </button>
+              onClick={() => setBuildType("release")} disabled={isActive}>🚀 {t.release}</button>
           </div>
         </div>
 
-        {/* Drop Zone */}
         {["idle", "done", "error"].includes(stage) && (
           <div {...getRootProps()} className={`dropzone ${isDragActive ? "drag-active" : ""} ${stage === "error" ? "error-state" : ""}`}>
             <input {...getInputProps()} />
@@ -205,7 +240,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Stage Track */}
         {isActive && (
           <div className="stage-track">
             {STAGES.map((s, i) => {
@@ -222,7 +256,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Upload Progress */}
         {stage === "uploading" && (
           <div className="progress-wrap">
             <div className="progress-bar-bg">
@@ -232,7 +265,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Status */}
         {isActive && (
           <div className="status-msg">
             <span className="spinner" />
@@ -245,7 +277,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Success */}
         {stage === "done" && (
           <div className="result-card success">
             <div className="result-icon success">✦</div>
@@ -265,7 +296,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Error */}
         {stage === "error" && errorMsg && (
           <div className="result-card error">
             <div className="result-icon error">✗</div>
@@ -275,7 +305,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Terminal Logs */}
         {logs.length > 0 && (
           <div className="terminal-wrap">
             <div className="terminal-header">
