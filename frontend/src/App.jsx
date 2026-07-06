@@ -15,24 +15,26 @@ const STAGES = [
 
 const TRANSLATIONS = {
   en: {
-    title: "APK Builder", sub: "Upload ZIP → Build → Download APK",
+    title: "APK Builder", sub: "Upload ZIP → Build → Download",
     drop: "Drop your .zip here", browse: "or tap to browse files",
-    maxSize: "Max 200MB · ZIP files only", debug: "Debug", release: "Release",
+    maxSize: "Max 200MB · ZIP files only", debug: "Debug", release: "Release", aab: "AAB",
     buildType: "Build Type", uploading: "Uploading...", extracting: "Extracting ZIP...",
-    validating: "Validating project...", building: "Building APK...",
-    success: "Build Successful!", download: "Download APK", failed: "Build Failed",
-    restart: "New Build", logs: "Build Logs", apkSize: "APK Size",
+    validating: "Validating project...", building: "Building...",
+    success: "Build Successful!", download: "Download", failed: "Build Failed",
+    restart: "New Build", logs: "Build Logs", apkSize: "Size",
     buildTime: "Build Time", install: "Install App",
+    aabNote: "AAB is for Play Store upload only",
   },
   he: {
-    title: "בונה APK", sub: "העלה ZIP ← בנה ← הורד APK",
+    title: "בונה APK", sub: "העלה ZIP ← בנה ← הורד",
     drop: "גרור קובץ .zip לכאן", browse: "או לחץ לבחירת קובץ",
-    maxSize: "מקסימום 200MB · קבצי ZIP בלבד", debug: "דיבאג", release: "ריליס",
+    maxSize: "מקסימום 200MB · קבצי ZIP בלבד", debug: "דיבאג", release: "ריליס", aab: "AAB",
     buildType: "סוג בנייה", uploading: "מעלה...", extracting: "מחלץ...",
-    validating: "מאמת פרויקט...", building: "בונה APK...",
-    success: "הבנייה הצליחה!", download: "הורד APK", failed: "הבנייה נכשלה",
-    restart: "בנייה חדשה", logs: "יומן בנייה", apkSize: "גודל APK",
+    validating: "מאמת פרויקט...", building: "בונה...",
+    success: "הבנייה הצליחה!", download: "הורד", failed: "הבנייה נכשלה",
+    restart: "בנייה חדשה", logs: "יומן בנייה", apkSize: "גודל",
     buildTime: "זמן בנייה", install: "התקן אפליקציה",
+    aabNote: "AAB מיועד להעלאה לחנות בלבד",
   },
 };
 
@@ -49,7 +51,6 @@ export default function App() {
   const [buildStartTime, setBuildStartTime] = useState(null);
   const [qrCode, setQrCode] = useState(null);
   const [installPrompt, setInstallPrompt] = useState(null);
-  const [currentBuildId, setCurrentBuildId] = useState(null);
   const logsRef = useRef(null);
   const wsRef = useRef(null);
   const pollRef = useRef(null);
@@ -63,13 +64,6 @@ export default function App() {
     return () => window.removeEventListener('beforeinstallprompt', handler);
   }, []);
 
-  const handleInstall = async () => {
-    if (!installPrompt) return;
-    installPrompt.prompt();
-    const { outcome } = await installPrompt.userChoice;
-    if (outcome === 'accepted') setInstallPrompt(null);
-  };
-
   const addLog = (text, type = "info") => {
     const key = `${text}${type}`;
     if (seenLogsRef.current.has(key)) return;
@@ -80,6 +74,10 @@ export default function App() {
   useEffect(() => {
     if (logsRef.current) logsRef.current.scrollTop = logsRef.current.scrollHeight;
   }, [logs]);
+
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
 
   const handleResult = useCallback((msg) => {
     if (msg.type === 'success') {
@@ -97,51 +95,32 @@ export default function App() {
     }
   }, [buildStartTime]);
 
-  const stopPolling = () => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-  };
-
   const startPolling = useCallback((buildId) => {
-    // Poll every 5 seconds as backup to WebSocket
     pollRef.current = setInterval(async () => {
       try {
         const res = await fetch(`${API_URL}/api/status/${buildId}`);
         const data = await res.json();
-
-        // Add any new logs
-        if (data.logs) {
-          data.logs.forEach(log => addLog(log.text, log.level || 'info'));
-        }
-
-        // Update stage
+        if (data.logs) data.logs.forEach(log => addLog(log.text, log.level || 'info'));
         if (data.status === 'building') setStage('build');
-
-        // Handle result
         if (data.result) handleResult(data.result);
-
-      } catch (e) { /* ignore poll errors */ }
+      } catch {}
     }, 5000);
   }, [handleResult]);
 
   const connectWS = useCallback((buildId) => {
     const ws = new WebSocket(`${WS_URL}/ws/${buildId}`);
     wsRef.current = ws;
-
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data);
       if (msg.type === "log") addLog(msg.text, msg.level || "info");
       if (msg.type === "stage") setStage(msg.stage);
       if (msg.type === "success" || msg.type === "error") handleResult(msg);
     };
-
     ws.onerror = () => addLog("WebSocket disconnected — polling active", "warn");
   }, [handleResult]);
 
   const onDrop = useCallback(async (accepted, rejected) => {
-    if (rejected.length > 0) {
-      setErrorMsg("Please upload a .zip file under 200MB");
-      setStage("error"); return;
-    }
+    if (rejected.length > 0) { setErrorMsg("Please upload a .zip file under 200MB"); setStage("error"); return; }
     const file = accepted[0];
     setStage("uploading"); setUploadProgress(0); setLogs([]);
     setApkUrl(null); setErrorMsg(null); setBuildStartTime(Date.now());
@@ -159,7 +138,6 @@ export default function App() {
     xhr.onload = () => {
       const data = JSON.parse(xhr.responseText);
       if (xhr.status === 200) {
-        setCurrentBuildId(data.buildId);
         connectWS(data.buildId);
         startPolling(data.buildId);
         setStage("extract");
@@ -185,7 +163,7 @@ export default function App() {
     stopPolling();
     setStage("idle"); setLogs([]); setUploadProgress(0);
     setApkUrl(null); setApkSize(null); setBuildTime(null);
-    setErrorMsg(null); setQrCode(null); setCurrentBuildId(null);
+    setErrorMsg(null); setQrCode(null);
     seenLogsRef.current = new Set();
   };
 
@@ -194,6 +172,9 @@ export default function App() {
     stage === "done" ? s.id === "done" :
     stage === "uploading" ? s.id === "upload" : s.id === stage
   );
+
+  const isAAB = buildType === "aab";
+  const fileExt = isAAB ? "AAB" : "APK";
 
   return (
     <div className={`app ${lang === "he" ? "rtl" : ""}`}>
@@ -204,7 +185,7 @@ export default function App() {
         </div>
         <div className="nav-actions">
           {installPrompt && (
-            <button className="install-btn" onClick={handleInstall}>📲 {t.install}</button>
+            <button className="install-btn" onClick={() => { installPrompt.prompt(); }}>📲 {t.install}</button>
           )}
           <button className={`lang-btn ${lang === "en" ? "active" : ""}`} onClick={() => setLang("en")}>EN</button>
           <button className={`lang-btn ${lang === "he" ? "active" : ""}`} onClick={() => setLang("he")}>עב</button>
@@ -217,6 +198,7 @@ export default function App() {
           <p className="hero-sub">{t.sub}</p>
         </header>
 
+        {/* Build Type */}
         <div className="build-type-row">
           <span className="build-type-label">{t.buildType}:</span>
           <div className="toggle-group">
@@ -224,9 +206,17 @@ export default function App() {
               onClick={() => setBuildType("debug")} disabled={isActive}>🐛 {t.debug}</button>
             <button className={`toggle-btn ${buildType === "release" ? "active" : ""}`}
               onClick={() => setBuildType("release")} disabled={isActive}>🚀 {t.release}</button>
+            <button className={`toggle-btn ${buildType === "aab" ? "active aab" : ""}`}
+              onClick={() => setBuildType("aab")} disabled={isActive}>📦 {t.aab}</button>
           </div>
         </div>
 
+        {/* AAB note */}
+        {buildType === "aab" && (
+          <div className="aab-note">🏪 {t.aabNote}</div>
+        )}
+
+        {/* Drop Zone */}
         {["idle", "done", "error"].includes(stage) && (
           <div {...getRootProps()} className={`dropzone ${isDragActive ? "drag-active" : ""} ${stage === "error" ? "error-state" : ""}`}>
             <input {...getInputProps()} />
@@ -240,6 +230,7 @@ export default function App() {
           </div>
         )}
 
+        {/* Stage Track */}
         {isActive && (
           <div className="stage-track">
             {STAGES.map((s, i) => {
@@ -256,6 +247,7 @@ export default function App() {
           </div>
         )}
 
+        {/* Upload Progress */}
         {stage === "uploading" && (
           <div className="progress-wrap">
             <div className="progress-bar-bg">
@@ -265,6 +257,7 @@ export default function App() {
           </div>
         )}
 
+        {/* Status */}
         {isActive && (
           <div className="status-msg">
             <span className="spinner" />
@@ -277,25 +270,34 @@ export default function App() {
           </div>
         )}
 
+        {/* Success */}
         {stage === "done" && (
           <div className="result-card success">
             <div className="result-icon success">✦</div>
             <h2 className="result-title">{t.success}</h2>
             <div className="result-meta">
-              {apkSize && <span className="meta-chip">📦 {apkSize}</span>}
+              {apkSize && <span className="meta-chip">📦 {fileExt} · {apkSize}</span>}
               {buildTime && <span className="meta-chip">⏱ {buildTime}s</span>}
             </div>
-            <a href={`${API_URL}${apkUrl}`} download className="download-btn">↓ {t.download}</a>
-            {qrCode && (
+            <a href={`${API_URL}${apkUrl}`} download className="download-btn">
+              ↓ {t.download} {fileExt}
+            </a>
+            {!isAAB && qrCode && (
               <div className="qr-wrap">
                 <img src={qrCode} alt="QR" className="qr-img" />
                 <p className="qr-hint">Scan on another device</p>
+              </div>
+            )}
+            {isAAB && (
+              <div className="aab-note" style={{marginTop: '8px'}}>
+                🏪 העלה את קובץ ה-AAB ל-Google Play Console
               </div>
             )}
             <button className="restart-btn" onClick={reset}>{t.restart}</button>
           </div>
         )}
 
+        {/* Error */}
         {stage === "error" && errorMsg && (
           <div className="result-card error">
             <div className="result-icon error">✗</div>
@@ -305,6 +307,7 @@ export default function App() {
           </div>
         )}
 
+        {/* Logs */}
         {logs.length > 0 && (
           <div className="terminal-wrap">
             <div className="terminal-header">
