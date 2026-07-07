@@ -1,4 +1,4 @@
-# ◈ APK Builder
+# ◈ APK Builder 😊 
 
 > Upload your Android Studio ZIP → Automatic APK build → Download in seconds
 
