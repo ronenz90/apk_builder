@@ -156,17 +156,20 @@ export default function App() {
 
   // Check if auth is needed on load
   useEffect(() => {
-    fetch(`${API_URL}/api/health`).then(res => {
-      if (res.status === 401) {
+    const token = getToken();
+    const headers = token ? { 'x-auth-token': token } : {};
+    fetch(`${API_URL}/api/auth/check`, { headers }).then(res => res.json()).then(data => {
+      if (!data.required) {
+        // אין סיסמה בשרת — כנס ישירות
+        setAuthed(true);
+      } else if (data.valid) {
+        // יש token שמור ותקין
         setNeedsAuth(true);
-        if (getToken()) {
-          // Try saved token
-          fetch(`${API_URL}/api/health`, { headers: authHeaders() }).then(r => {
-            if (r.ok) setAuthed(true);
-          });
-        }
+        setAuthed(true);
       } else {
-        setAuthed(true); // No auth required
+        // צריך סיסמה
+        setNeedsAuth(true);
+        setAuthed(false);
       }
     }).catch(() => setAuthed(true));
   }, []);
