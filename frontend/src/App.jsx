@@ -83,17 +83,18 @@ function LoginScreen({ lang, onLogin }) {
     setError('');
     const token = btoa(`${user}:${pass}`);
     try {
-      const res = await fetch(`${API_URL}/api/health`, {
+      const res = await fetch(`${API_URL}/api/auth/check`, {
         headers: { 'x-auth-token': token }
       });
-      if (res.ok) {
+      const data = await res.json();
+      if (data.valid) {
         setToken(user, pass);
         onLogin();
       } else {
         setError(t.loginError);
       }
-    } catch {
-      setError('Connection error');
+    } catch (e) {
+      setError('Connection error: ' + e.message);
     }
     setLoading(false);
   };
