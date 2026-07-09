@@ -202,8 +202,18 @@ export default function App() {
       setQrCode(msg.qrCode);
       setBuildTime(((Date.now() - buildStartTime) / 1000).toFixed(1));
       stopPolling();
+      // Android notification
+      if (window.AndroidBridge) {
+        window.AndroidBridge.buildSuccess(msg.apkUrl?.split('/').pop() || 'app', msg.apkSize || '');
+      }
     }
-    if (msg.type === 'error') { setStage("error"); setErrorMsg(msg.message); stopPolling(); }
+    if (msg.type === 'error') {
+      setStage("error"); setErrorMsg(msg.message); stopPolling();
+      // Android notification
+      if (window.AndroidBridge) {
+        window.AndroidBridge.buildFailed('Build', msg.message || 'Unknown error');
+      }
+    }
   }, [buildStartTime]);
 
   const startPolling = useCallback((buildId) => {
@@ -422,7 +432,7 @@ export default function App() {
               {buildTime && <span className="meta-chip">⏱ {buildTime}s</span>}
               {versionName && <span className="meta-chip">🏷 v{versionName}</span>}
             </div>
-            <a href={`${API_URL}${apkUrl}?token=${getToken()}`} download className="download-btn">
+            <a href={`${API_URL}${apkUrl}`} download className="download-btn">
               ↓ {t.download} {fileExt}
             </a>
             {!isAAB && qrCode && (
